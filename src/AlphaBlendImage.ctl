@@ -56,8 +56,17 @@ Private Const DIB_RGB_COLORS                As Long = 0 '  color table in RGBs
 Private Const InterpolationModeHighQualityBicubic As Long = 7
 '--- for Gdip*WorldTransform
 Private Const MatrixOrderAppend             As Long = 1
+'--- for GdipBitmapLockBits
+Private Const ImageLockModeRead             As Long = &H1
+'--- for GlobalAlloc
+Private Const GMEM_DDESHARE                 As Long = &H2000
+Private Const GMEM_MOVEABLE                 As Long = &H2
+'--- for SetClipboardData
+Private Const CF_DIBV5                      As Long = 17
+Private Const BI_BITFIELDS                  As Long = 3
 
 Private Declare Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (lpDst As Any, lpSrc As Any, ByVal ByteLength As Long)
+Private Declare Function ArrPtr Lib "msvbvm60" Alias "VarPtr" (Ptr() As Any) As Long
 Private Declare Function OleTranslateColor Lib "oleaut32" (ByVal lOleColor As Long, ByVal lHPalette As Long, ByVal lColorRef As Long) As Long
 Private Declare Function CreateCompatibleDC Lib "gdi32" (ByVal hDC As Long) As Long
 Private Declare Function DeleteDC Lib "gdi32" (ByVal hDC As Long) As Long
@@ -73,6 +82,17 @@ Private Declare Function CreateBitmap Lib "gdi32" (ByVal nWidth As Long, ByVal n
 Private Declare Function CreateIconIndirect Lib "user32" (pIconInfo As ICONINFO) As Long
 Private Declare Function DestroyIcon Lib "user32" (ByVal hIcon As Long) As Long
 Private Declare Function SHCreateMemStream Lib "shlwapi" Alias "#12" (ByRef pInit As Any, ByVal cbInit As Long) As IUnknown
+Private Declare Function CreateSolidBrush Lib "gdi32" (ByVal clrColor As Long) As Long
+Private Declare Function FillRect Lib "user32" (ByVal hDC As Long, lpRect As RECT, ByVal hBrush As Long) As Long
+'--- clipboard support
+Private Declare Function OpenClipboard Lib "user32" (ByVal hWnd As Long) As Long
+Private Declare Function CloseClipboard Lib "user32" () As Long
+Private Declare Function EmptyClipboard Lib "user32" () As Long
+Private Declare Function SetClipboardData Lib "user32" (ByVal wFormat As Long, ByVal hMem As Long) As Long
+Private Declare Function GlobalAlloc Lib "kernel32" (ByVal wFlags As Long, ByVal dwBytes As Long) As Long
+Private Declare Function GlobalLock Lib "kernel32" (ByVal hMem As Long) As Long
+Private Declare Function GlobalUnlock Lib "kernel32" (ByVal hMem As Long) As Long
+Private Declare Function GlobalFree Lib "kernel32" (ByVal hMem As Long) As Long
 '--- gdi+
 Private Declare Function GdiplusStartup Lib "gdiplus" (hToken As Long, pInputBuf As Any, Optional ByVal pOutputBuf As Long = 0) As Long
 Private Declare Function GdipCreateBitmapFromScan0 Lib "gdiplus" (ByVal lWidth As Long, ByVal lHeight As Long, ByVal lStride As Long, ByVal lPixelFormat As Long, ByVal Scan0 As Long, hBitmap As Long) As Long
@@ -95,6 +115,8 @@ Private Declare Function GdipTranslateWorldTransform Lib "gdiplus" (ByVal hGraph
 Private Declare Function GdipScaleWorldTransform Lib "gdiplus" (ByVal hGraphics As Long, ByVal nSx As Single, ByVal nSy As Single, ByVal lOrder As Long) As Long
 Private Declare Function GdipRotateWorldTransform Lib "gdiplus" (ByVal hGraphics As Long, ByVal nRotation As Single, ByVal lOrder As Long) As Long
 Private Declare Function GdipSetInterpolationMode Lib "gdiplus" (ByVal hGraphics As Long, ByVal lMode As Long) As Long
+Private Declare Function GdipBitmapLockBits Lib "gdiplus" (ByVal hBitmap As Long, lpRect As Any, ByVal lFlags As Long, ByVal lPixelFormat As Long, uLockedBitmapData As BitmapData) As Long
+Private Declare Function GdipBitmapUnlockBits Lib "gdiplus" (ByVal hBitmap As Long, uLockedBitmapData As BitmapData) As Long
 
 Private Type BITMAPINFOHEADER
     biSize              As Long
@@ -123,6 +145,67 @@ Private Type PICTDESC
     lType               As Long
     hBmp                As Long
     hPal                As Long
+End Type
+
+Private Type SAFEARRAY1D
+    cDims               As Integer
+    fFeatures           As Integer
+    cbElements          As Long
+    cLocks              As Long
+    pvData              As Long
+    cElements           As Long
+    lLbound             As Long
+End Type
+
+Private Type RECT
+    Left                As Long
+    Top                 As Long
+    Right               As Long
+    Bottom              As Long
+End Type
+
+Private Type BitmapData
+    Width               As Long
+    Height              As Long
+    Stride              As Long
+    PixelFormat         As Long
+    Scan0               As Long
+    Reserved            As Long
+End Type
+
+Private Type BITMAPV5HEADER
+    bV5Size             As Long
+    bV5Width            As Long
+    bV5Height           As Long
+    bV5Planes           As Integer
+    bV5BitCount         As Integer
+    bV5Compression      As Long
+    bV5SizeImage        As Long
+    bV5XPelsPerMeter    As Long
+    bV5YPelsPerMeter    As Long
+    bV5ClrUsed          As Long
+    bV5ClrImportant     As Long
+    bV5RedMask          As Long
+    bV5GreenMask        As Long
+    bV5BlueMask         As Long
+    bV5AlphaMask        As Long
+    bV5CSType           As Long
+    bV5EndpointsRedX    As Long
+    bV5EndpointsRedY    As Long
+    bV5EndpointsRedZ    As Long
+    bV5EndpointsGreenX  As Long
+    bV5EndpointsGreenY  As Long
+    bV5EndpointsGreenZ  As Long
+    bV5EndpointsBlueX   As Long
+    bV5EndpointsBlueY   As Long
+    bV5EndpointsBlueZ   As Long
+    bV5GammaRed         As Long
+    bV5GammaGreen       As Long
+    bV5GammaBlue        As Long
+    bV5Intent           As Long
+    bV5ProfileData      As Long
+    bV5ProfileSize      As Long
+    bV5Reserved         As Long
 End Type
 
 '=========================================================================
@@ -318,10 +401,11 @@ Public Sub Repaint()
         pvPrepareAttribs m_sngOpacity, m_hAttributes
         Refresh
     End If
+QH:
     Exit Sub
 EH:
     PrintError FUNC_NAME
-    Resume Next
+    Resume QH
 End Sub
 
 Public Function GdipLoadPicture(sFileName As String) As StdPicture
@@ -337,7 +421,7 @@ QH:
     Exit Function
 EH:
     PrintError FUNC_NAME
-    Resume Next
+    Resume QH
 End Function
 
 Public Function GdipLoadPictureArray(baBuffer() As Byte) As StdPicture
@@ -358,7 +442,158 @@ QH:
     Exit Function
 EH:
     PrintError FUNC_NAME
-    Resume Next
+    Resume QH
+End Function
+
+Public Function GdipSetClipboardDib(oPic As StdPicture) As Boolean
+    Const FUNC_NAME     As String = "GdipSetClipboardDib"
+    Const SIGN_BIT      As Long = &H80000000
+    Dim hPictureBitmap  As Long
+    Dim hPictureAttributes As Long
+    Dim uData           As BitmapData
+    Dim bNeedClipClose  As Boolean
+    Dim uHdr            As BITMAPINFOHEADER
+    Dim aColors(0 To 2)  As Long
+    Dim lPtr            As Long
+    Dim hMem            As Long
+    
+    On Error GoTo EH
+    If Not pvPreparePicture(oPic, MaskColor, hPictureBitmap, hPictureAttributes) Then
+        GoTo QH
+    End If
+    If GdipBitmapLockBits(hPictureBitmap, ByVal 0, ImageLockModeRead, PixelFormat32bppARGB, uData) <> 0 Then
+        GoTo QH
+    End If
+    uHdr.biSize = LenB(uHdr)
+    uHdr.biWidth = uData.Width
+    uHdr.biHeight = -uData.Height
+    uHdr.biPlanes = 1
+    uHdr.biBitCount = 32
+    uHdr.biCompression = BI_BITFIELDS
+    uHdr.biSizeImage = uData.Stride * uData.Height
+    aColors(0) = &HFF0000
+    aColors(1) = &HFF00&
+    aColors(2) = &HFF&
+    hMem = GlobalAlloc(GMEM_DDESHARE Or GMEM_MOVEABLE, LenB(uHdr) + 12 + uData.Stride * uData.Height)
+    If hMem = 0 Then
+        GoTo QH
+    End If
+    lPtr = GlobalLock(hMem)
+    If lPtr = 0 Then
+        GoTo QH
+    End If
+    Call CopyMemory(ByVal lPtr, uHdr, LenB(uHdr)):      lPtr = (lPtr Xor SIGN_BIT) + LenB(uHdr) Xor SIGN_BIT
+    Call CopyMemory(ByVal lPtr, aColors(0), 12):        lPtr = (lPtr Xor SIGN_BIT) + 12 Xor SIGN_BIT
+    Call CopyMemory(ByVal lPtr, ByVal uData.Scan0, uData.Stride * uData.Height)
+    Call GlobalUnlock(hMem)
+    '--- clip copy
+    If OpenClipboard(hWnd) = 0 Then
+        GoTo QH
+    End If
+    bNeedClipClose = True
+    If EmptyClipboard() = 0 Then
+        GoTo QH
+    End If
+    If SetClipboardData(vbCFDIB, hMem) = 0 Then
+        GoTo QH
+    End If
+    '--- success
+    GdipSetClipboardDib = True
+QH:
+    If bNeedClipClose Then
+        Call CloseClipboard
+    End If
+    If hMem <> 0 Then
+        Call GlobalFree(hMem)
+    End If
+    If uData.Scan0 <> 0 Then
+        Call GdipBitmapUnlockBits(hPictureBitmap, uData)
+    End If
+    If hPictureBitmap <> 0 Then
+        Call GdipDisposeImage(hPictureBitmap)
+    End If
+    If hPictureAttributes <> 0 Then
+        Call GdipDisposeImageAttributes(hPictureAttributes)
+    End If
+    Exit Function
+EH:
+    PrintError FUNC_NAME
+    Resume QH
+End Function
+
+Public Function GdipSetClipboardDibV5(oPic As StdPicture) As Boolean
+    Const FUNC_NAME     As String = "GdipSetClipboardDibV5"
+    Const SIGN_BIT      As Long = &H80000000
+    Dim hPictureBitmap  As Long
+    Dim hPictureAttributes As Long
+    Dim uData           As BitmapData
+    Dim bNeedClipClose  As Boolean
+    Dim uHdr            As BITMAPV5HEADER
+    Dim lPtr            As Long
+    Dim hMem            As Long
+    
+    On Error GoTo EH
+    If Not pvPreparePicture(oPic, MaskColor, hPictureBitmap, hPictureAttributes) Then
+        GoTo QH
+    End If
+    If GdipBitmapLockBits(hPictureBitmap, ByVal 0, ImageLockModeRead, PixelFormat32bppARGB, uData) <> 0 Then
+        GoTo QH
+    End If
+    uHdr.bV5Size = LenB(uHdr)
+    uHdr.bV5Width = uData.Width
+    uHdr.bV5Height = -uData.Height
+    uHdr.bV5Planes = 1
+    uHdr.bV5BitCount = 32
+    uHdr.bV5Compression = BI_BITFIELDS
+    uHdr.bV5SizeImage = uData.Stride * uData.Height
+    uHdr.bV5RedMask = &HFF0000
+    uHdr.bV5GreenMask = &HFF00&
+    uHdr.bV5BlueMask = &HFF&
+    uHdr.bV5AlphaMask = &HFF000000
+    hMem = GlobalAlloc(GMEM_DDESHARE Or GMEM_MOVEABLE, LenB(uHdr) + uData.Stride * uData.Height)
+    If hMem = 0 Then
+        GoTo QH
+    End If
+    lPtr = GlobalLock(hMem)
+    If lPtr = 0 Then
+        GoTo QH
+    End If
+    Call CopyMemory(ByVal lPtr, uHdr, LenB(uHdr)):      lPtr = (lPtr Xor SIGN_BIT) + LenB(uHdr) Xor SIGN_BIT
+    Call CopyMemory(ByVal lPtr, ByVal uData.Scan0, uData.Stride * uData.Height)
+    Call GlobalUnlock(hMem)
+    '--- clip copy
+    If OpenClipboard(hWnd) = 0 Then
+        GoTo QH
+    End If
+    bNeedClipClose = True
+    If EmptyClipboard() = 0 Then
+        GoTo QH
+    End If
+    If SetClipboardData(CF_DIBV5, hMem) = 0 Then
+        GoTo QH
+    End If
+    '--- success
+    GdipSetClipboardDibV5 = True
+QH:
+    If bNeedClipClose Then
+        Call CloseClipboard
+    End If
+    If hMem <> 0 Then
+        Call GlobalFree(hMem)
+    End If
+    If uData.Scan0 <> 0 Then
+        Call GdipBitmapUnlockBits(hPictureBitmap, uData)
+    End If
+    If hPictureBitmap <> 0 Then
+        Call GdipDisposeImage(hPictureBitmap)
+    End If
+    If hPictureAttributes <> 0 Then
+        Call GdipDisposeImageAttributes(hPictureAttributes)
+    End If
+    Exit Function
+EH:
+    PrintError FUNC_NAME
+    Resume QH
 End Function
 
 '= private ===============================================================
@@ -522,7 +757,7 @@ Private Function pvPrepareBitmap(hBitmap As Long) As Boolean
                 GoTo QH
             End If
             If Not m_bStretch And Abs(m_sngZoom) > EPSILON Then
-                sngZoom = m_sngZoom
+                sngZoom = Abs(m_sngZoom)
             Else
                 sngZoom = 1
             End If
@@ -535,15 +770,13 @@ Private Function pvPrepareBitmap(hBitmap As Long) As Boolean
             If GdipScaleWorldTransform(hGraphics, sngZoom, sngZoom, MatrixOrderAppend) <> 0 Then
                 GoTo QH
             End If
+            lLeft = lLeft - lWidth / 2
+            lTop = lTop - lHeight / 2
             If m_bStretch Then
-                lLeft = lLeft - lWidth / 2
-                lTop = lTop - lHeight / 2
                 If GdipDrawImageRectRect(hGraphics, m_hPictureBitmap, lLeft, lTop, lWidth, lHeight, 0, 0, sngPicWidth, sngPicHeight, , m_hPictureAttributes) <> 0 Then
                     GoTo QH
                 End If
             Else
-                lLeft = lLeft - sngZoom * sngPicWidth / 2
-                lTop = lTop - sngZoom * sngPicHeight / 2
                 If GdipDrawImageRectRect(hGraphics, m_hPictureBitmap, lLeft + (lWidth - sngPicWidth) / 2, lTop + (lHeight - sngPicHeight) / 2, sngPicWidth, sngPicHeight, 0, 0, sngPicWidth, sngPicHeight, , m_hPictureAttributes) <> 0 Then
                     GoTo QH
                 End If
@@ -629,79 +862,82 @@ Private Function pvPreparePicture(oPicture As StdPicture, ByVal clrMask As OLE_C
     Dim hMemDC          As Long
     Dim uInfo           As ICONINFO
     Dim baColorBits()   As Byte
-    Dim bHasAlpha       As Boolean
     Dim hDib            As Long
     Dim lpBits          As Long
     Dim hPrevDib        As Long
-    Dim lIdx            As Long
     Dim pPic            As IPicture
+    Dim hBrush          As Long
+    Dim rc              As RECT
     
     On Error GoTo EH
     If Not oPicture Is Nothing Then
         If oPicture.Handle <> 0 Then
-            Select Case oPicture.Type
-            Case vbPicTypeBitmap
-                If GdipCreateBitmapFromHBITMAP(oPicture.Handle, 0, hNewBitmap) <> 0 Then
+            lWidth = HM2Pix(oPicture.Width)
+            lHeight = HM2Pix(oPicture.Height)
+            hMemDC = CreateCompatibleDC(0)
+            If hMemDC = 0 Then
+                GoTo QH
+            End If
+            With uHdr
+                .biSize = Len(uHdr)
+                .biPlanes = 1
+                .biBitCount = 32
+                .biWidth = lWidth
+                .biHeight = -lHeight
+                .biSizeImage = (4 * lWidth) * lHeight
+            End With
+            If oPicture.Type = vbPicTypeIcon Then
+                If GetIconInfo(oPicture.Handle, uInfo) = 0 Then
                     GoTo QH
+                End If
+                ReDim baColorBits(0 To uHdr.biSizeImage - 1) As Byte
+                If GetDIBits(hMemDC, uInfo.hbmColor, 0, lHeight, baColorBits(0), uHdr, DIB_RGB_COLORS) = 0 Then
+                    GoTo QH
+                End If
+                If Not pvHasAlpha(VarPtr(baColorBits(0)), uHdr.biSizeImage) Then
+                    '--- note: GdipCreateBitmapFromHICON is working ok for old-style (single-bit) transparent icons only
+                    If GdipCreateBitmapFromHICON(oPicture.Handle, hNewBitmap) <> 0 Then
+                        GoTo QH
+                    End If
+                Else
+                    If GdipCreateBitmapFromScan0(lWidth, lHeight, 4 * lWidth, PixelFormat32bppPARGB, VarPtr(baColorBits(0)), hTempBitmap) <> 0 Then
+                        GoTo QH
+                    End If
+                    If GdipCloneBitmapAreaI(0, 0, lWidth, lHeight, PixelFormat32bppARGB, hTempBitmap, hNewBitmap) <> 0 Then
+                        GoTo QH
+                    End If
+                End If
+            Else
+                hDib = CreateDIBSection(hMemDC, uHdr, DIB_RGB_COLORS, lpBits, 0, 0)
+                If hDib = 0 Then
+                    GoTo QH
+                End If
+                hPrevDib = SelectObject(hMemDC, hDib)
+                If oPicture.Type = vbPicTypeMetafile Or oPicture.Type = vbPicTypeEMetafile Then
+                    clrMask = vbMagenta
                 End If
                 If clrMask <> -1 Then
-                    If GdipCreateImageAttributes(hNewAttributes) <> 0 Then
-                        GoTo QH
-                    End If
-                    If GdipSetImageAttributesColorKeys(hNewAttributes, 0, 1, TranslateColor(clrMask), TranslateColor(clrMask)) <> 0 Then
-                        GoTo QH
-                    End If
+                    Call OleTranslateColor(clrMask, 0, VarPtr(clrMask))
+                    hBrush = CreateSolidBrush(clrMask)
+                    rc.Right = lWidth
+                    rc.Bottom = lHeight
+                    Call FillRect(hMemDC, rc, hBrush)
+                    Call DeleteObject(hBrush)
                 End If
-            Case Else
-                lWidth = HM2Pix(oPicture.Width)
-                lHeight = HM2Pix(oPicture.Height)
-                hMemDC = CreateCompatibleDC(0)
-                If hMemDC = 0 Then
-                    GoTo QH
-                End If
-                With uHdr
-                    .biSize = Len(uHdr)
-                    .biPlanes = 1
-                    .biBitCount = 32
-                    .biWidth = lWidth
-                    .biHeight = -lHeight
-                    .biSizeImage = (4 * lWidth) * lHeight
-                End With
-                If oPicture.Type = vbPicTypeIcon Then
-                    If GetIconInfo(oPicture.Handle, uInfo) = 0 Then
-                        GoTo QH
-                    End If
-                    ReDim baColorBits(0 To uHdr.biSizeImage - 1) As Byte
-                    If GetDIBits(hMemDC, uInfo.hbmColor, 0, lHeight, baColorBits(0), uHdr, DIB_RGB_COLORS) = 0 Then
-                        GoTo QH
-                    End If
-                    For lIdx = 3 To UBound(baColorBits) Step 4
-                        If baColorBits(lIdx) <> 0 Then
-                            bHasAlpha = True
-                            Exit For
-                        End If
-                    Next
-                    If Not bHasAlpha Then
-                        '--- note: GdipCreateBitmapFromHICON working ok for old-style (single-bit) transparent icons only
-                        If GdipCreateBitmapFromHICON(oPicture.Handle, hNewBitmap) <> 0 Then
+                Set pPic = oPicture
+                pPic.Render hMemDC, 0, 0, lWidth, lHeight, 0, oPicture.Height, oPicture.Width, -oPicture.Height, ByVal 0
+                If Not pvHasAlpha(lpBits, uHdr.biSizeImage) Then
+                    '--- note: GdipCreateBitmapFromHBITMAP is working ok for non-transparent bitmaps
+                    If oPicture.Type = vbPicTypeBitmap Then
+                        If GdipCreateBitmapFromHBITMAP(oPicture.Handle, oPicture.hPal, hNewBitmap) <> 0 Then
                             GoTo QH
                         End If
                     Else
-                        If GdipCreateBitmapFromScan0(lWidth, lHeight, 4 * lWidth, PixelFormat32bppPARGB, VarPtr(baColorBits(0)), hTempBitmap) <> 0 Then
-                            GoTo QH
-                        End If
-                        If GdipCloneBitmapAreaI(0, 0, lWidth, lHeight, PixelFormat32bppARGB, hTempBitmap, hNewBitmap) <> 0 Then
+                        If GdipCreateBitmapFromHBITMAP(hDib, 0, hNewBitmap) <> 0 Then
                             GoTo QH
                         End If
                     End If
                 Else
-                    hDib = CreateDIBSection(hMemDC, uHdr, DIB_RGB_COLORS, lpBits, 0, 0)
-                    If hDib = 0 Then
-                        GoTo QH
-                    End If
-                    hPrevDib = SelectObject(hMemDC, hDib)
-                    Set pPic = oPicture
-                    pPic.Render hMemDC, 0, 0, lWidth, lHeight, 0, oPicture.Height, oPicture.Width, -oPicture.Height, ByVal 0
                     If GdipCreateBitmapFromScan0(lWidth, lHeight, 4 * lWidth, PixelFormat32bppPARGB, lpBits, hTempBitmap) <> 0 Then
                         GoTo QH
                     End If
@@ -709,7 +945,15 @@ Private Function pvPreparePicture(oPicture As StdPicture, ByVal clrMask As OLE_C
                         GoTo QH
                     End If
                 End If
-            End Select
+            End If
+            If clrMask <> -1 Then
+                If GdipCreateImageAttributes(hNewAttributes) <> 0 Then
+                    GoTo QH
+                End If
+                If GdipSetImageAttributesColorKeys(hNewAttributes, 0, 1, TranslateColor(clrMask), TranslateColor(clrMask)) <> 0 Then
+                    GoTo QH
+                End If
+            End If
         End If
     End If
     '--- commit
@@ -777,8 +1021,8 @@ Private Sub pvSizeExtender(ByVal hBitmap As Long, oExt As VBControlExtender)
     If GdipGetImageDimension(m_hPictureBitmap, sngWidth, sngHeight) <> 0 Then
         GoTo QH
     End If
-    oExt.Width = ScaleX(sngWidth * m_sngZoom, vbPixels, m_eContainerScaleMode)
-    oExt.Height = ScaleY(sngHeight * m_sngZoom, vbPixels, m_eContainerScaleMode)
+    oExt.Width = ScaleX(sngWidth * Abs(m_sngZoom), vbPixels, m_eContainerScaleMode)
+    oExt.Height = ScaleY(sngHeight * Abs(m_sngZoom), vbPixels, m_eContainerScaleMode)
 QH:
 End Sub
 
@@ -788,6 +1032,28 @@ Private Sub pvHandleMouseDown(Button As Integer, Shift As Integer, X As Single, 
     m_sngDownX = X
     m_sngDownY = Y
 End Sub
+
+Private Function pvHasAlpha(ByVal lPtr As Long, ByVal lSize As Long) As Boolean
+    Dim uArray          As SAFEARRAY1D
+    Dim baBuffer()      As Byte
+    Dim lIdx            As Long
+    
+    With uArray
+        .cDims = 1
+        .fFeatures = 1 ' FADF_AUTO
+        .cbElements = 1
+        .pvData = lPtr
+        .cElements = lSize
+    End With
+    Call CopyMemory(ByVal ArrPtr(baBuffer), VarPtr(uArray), 4)
+    For lIdx = 3 To UBound(baBuffer) Step 4
+        If baBuffer(lIdx) <> 0 Then
+            pvHasAlpha = True
+            Exit Function
+        End If
+    Next
+End Function
+
 
 '= common ================================================================
 
@@ -895,7 +1161,7 @@ QH:
     Exit Sub
 EH:
     PrintError FUNC_NAME
-    Resume Next
+    Resume QH
 End Sub
 
 Private Sub UserControl_DblClick()
@@ -1005,10 +1271,11 @@ Private Sub UserControl_ReadProperties(PropBag As PropertyBag)
         pvSizeExtender m_hPictureBitmap, Extender
     End If
     pvRefresh
+QH:
     Exit Sub
 EH:
     PrintError FUNC_NAME
-    Resume Next
+    Resume QH
 End Sub
 
 Private Sub UserControl_WriteProperties(PropBag As PropertyBag)
@@ -1024,10 +1291,11 @@ Private Sub UserControl_WriteProperties(PropBag As PropertyBag)
         .WriteProperty "Stretch", m_bStretch, DEF_STRETCH
         .WriteProperty "Picture", m_oPicture, Nothing
     End With
+QH:
     Exit Sub
 EH:
     PrintError FUNC_NAME
-    Resume Next
+    Resume QH
 End Sub
 
 Private Sub UserControl_AmbientChanged(PropertyName As String)
